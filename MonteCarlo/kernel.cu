@@ -12,11 +12,20 @@
 #define START 1
 #define END 500000
 #define STEP 0.01
-#define MAX 10000000
+#define MAX_RANDOM_VALUE 10000
 #define THREADS_PER_BLOCK 1024
 
 __device__ double getFunctionValue(double x) {
     return 1 / x;
+}
+
+
+__device__ double getRandonPoint(long seed) {
+    curandState_t state;
+    curand_init(seed, 0, 0, &state);
+    double fraction = 1.0 / (RAND_MAX + 1.0);
+    double result = (curand(&state) % MAX_RANDOM_VALUE) * fraction * (START - END + 1) + END;
+    return result;
 }
 
 __global__ void monteCarlo(double* integral, unsigned int n)
@@ -26,8 +35,8 @@ __global__ void monteCarlo(double* integral, unsigned int n)
     curand_init(tid, /* seed контролирует последовательность значений, которые генерируются*/
         0, /* порядковый номер важен только с несколькими ядрами*/
         0, &state); /* curand работает как rand - за исключением того, что он принимает состояние как параметр*/
-
-    double result = curand(&state) % MAX;
+    double fraction = 1.0 / (RAND_MAX + 1.0);
+    double result = (curand(&state)% MAX_RANDOM_VALUE) * fraction * (START - END + 1) + END ;
     if (tid <= n && tid > 0)
     {
         double x = result * STEP;
@@ -44,8 +53,8 @@ __global__ void monteCarloWithShared(double* integral, unsigned int n) {
 
     curandState_t state;
     curand_init(tid, 0, 0, &state);
-
-    double result = curand(&state) % MAX;
+    double fraction = 1.0 / (RAND_MAX + 1.0);
+    double result = (curand(&state) % MAX_RANDOM_VALUE) * fraction * (START - END + 1) + END;
     if (tid <= n && tid > 0)
     {
         x = result * STEP;
@@ -68,18 +77,16 @@ int main()
     int blocksPerGrid = (n + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
     double* mas = new double[n];
     double* dev_mas;
-    
-    double* c = new double[n];
 
+    double* c = new double[n];
     double* dev_c;
     auto start = std::chrono::system_clock::now();
     cudaMalloc((void**)&dev_mas, n * sizeof(double));
     cudaMalloc((void**)&dev_c, n * sizeof(double));
 
     cudaMemcpy(dev_mas, mas, n * sizeof(double), cudaMemcpyHostToDevice);
-
-    // monteCarlo <<< blocksPerGrid, THREADS_PER_BLOCK >>> (dev_c, n);
-    monteCarloWithShared <<< blocksPerGrid, THREADS_PER_BLOCK >>> (dev_c, n);
+    //monteCarlo <<< blocksPerGrid, THREADS_PER_BLOCK >>> (dev_c, n);
+    monteCarloWithShared << < blocksPerGrid, THREADS_PER_BLOCK >> > (dev_c, n);
 
     cudaMemcpy(c, dev_c, n * sizeof(double), cudaMemcpyDeviceToHost);
     cudaFree(dev_mas);
@@ -87,6 +94,7 @@ int main()
     auto end = std::chrono::system_clock::now();
     double sum = 0;
     for (int i = 0; i < blocksPerGrid; i++)
+        //std::cout << "Result: " << c[i] << "\n";
         sum += c[i];
     std::cout << "Result: " << sum << "\n";
     std::chrono::duration<double> elapsed = end - start;
