@@ -13,33 +13,63 @@
 #define END 500000
 #define STEP 0.01
 #define MAX 10000000
+#define THREADS_PER_BLOCK 1024
 
-__global__ void monteCarlo(double* a, double* c, unsigned int n)
+__device__ double getFunctionValue(double x) {
+    return 1 / x;
+}
+
+__global__ void monteCarlo(double* integral, unsigned int n)
 {
     int tid = blockDim.x * blockIdx.x + threadIdx.x - 1;
     curandState_t state;
     curand_init(tid, /* seed контролирует последовательность значений, которые генерируются*/
-
         0, /* порядковый номер важен только с несколькими ядрами*/
-
         0,
-
-        &state);
-    /* curand работает как rand - за исключением того, что он принимает состояние как параметр*/
+        &state); /* curand работает как rand - за исключением того, что он принимает состояние как параметр*/
 
     double result = curand(&state) % MAX;
     if (tid > 0)
     {
         double x = result*STEP;
-        c[tid] = 1 / x;
+        integral[tid] = getFunctionValue(x);
     }
+}
+
+__global__ void monteCarloWithShared(double* integral, unsigned int n) {
+    __shared__ double cache[THREADS_PER_BLOCK];
+
+    int tid = threadIdx.x + blockIdx.x * blockDim.x;
+    int cacheIndex = threadIdx.x;
+    double x, temp = 0;
+
+    while (tid <= n && tid > 0)
+    {
+        x = tid;
+        temp += getFunctionValue(x);
+        tid += blockDim.x * gridDim.x;
+    }
+
+    cache[cacheIndex] = temp;
+    __syncthreads();
+    int i = blockDim.x / 2;
+
+    while (i != 0)
+    {
+        if (cacheIndex < i)
+            cache[cacheIndex] += cache[cacheIndex + i];
+        __syncthreads();
+        i /= 2;
+    }
+
+    if (cacheIndex == 0)
+        integral[blockIdx.x] = cache[0];
 }
 
 int main()
 {
     int n = (END - START + 1) / STEP;
-    int threadsPerBlock = 1024;
-    int blocksPerGrid = (n + threadsPerBlock - 1) / threadsPerBlock;
+    int blocksPerGrid = (n + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
     double* mas = new double[n];
     double* dev_mas;
     
@@ -52,7 +82,8 @@ int main()
 
     cudaMemcpy(dev_mas, mas, n * sizeof(double), cudaMemcpyHostToDevice);
 
-    monteCarlo <<<blocksPerGrid, threadsPerBlock >>> (dev_mas, dev_c, n);
+    // monteCarlo <<< blocksPerGrid, THREADS_PER_BLOCK >>> (dev_c, n);
+    monteCarloWithShared <<< blocksPerGrid, THREADS_PER_BLOCK >>> (dev_c, n);
 
     cudaMemcpy(c, dev_c, n * sizeof(double), cudaMemcpyDeviceToHost);
     cudaFree(dev_mas);
