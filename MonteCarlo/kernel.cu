@@ -25,45 +25,41 @@ __global__ void monteCarlo(double* integral, unsigned int n)
     curandState_t state;
     curand_init(tid, /* seed контролирует последовательность значений, которые генерируются*/
         0, /* порядковый номер важен только с несколькими ядрами*/
-        0,
-        &state); /* curand работает как rand - за исключением того, что он принимает состояние как параметр*/
+        0, &state); /* curand работает как rand - за исключением того, что он принимает состояние как параметр*/
 
     double result = curand(&state) % MAX;
-    if (tid > 0)
+    if (tid <= n && tid > 0)
     {
-        double x = result*STEP;
+        double x = result * STEP;
         integral[tid] = getFunctionValue(x);
     }
 }
 
 __global__ void monteCarloWithShared(double* integral, unsigned int n) {
-    __shared__ double cache[THREADS_PER_BLOCK];
+    __shared__ double sums[THREADS_PER_BLOCK];
 
-    int tid = threadIdx.x + blockIdx.x * blockDim.x;
+    int tid = threadIdx.x + blockIdx.x * blockDim.x - 1;
     int cacheIndex = threadIdx.x;
-    double x, temp = 0;
+    double x;
 
-    while (tid <= n && tid > 0)
+    curandState_t state;
+    curand_init(tid, 0, 0, &state);
+
+    double result = curand(&state) % MAX;
+    if (tid <= n && tid > 0)
     {
-        x = tid;
-        temp += getFunctionValue(x);
-        tid += blockDim.x * gridDim.x;
+        x = result * STEP;
+        sums[cacheIndex] = getFunctionValue(x);
     }
 
-    cache[cacheIndex] = temp;
     __syncthreads();
-    int i = blockDim.x / 2;
 
-    while (i != 0)
-    {
-        if (cacheIndex < i)
-            cache[cacheIndex] += cache[cacheIndex + i];
-        __syncthreads();
-        i /= 2;
+    if (cacheIndex == 0) {
+        for (int i = 1; i < THREADS_PER_BLOCK; i++) {
+            sums[0] += sums[i];
+        }
+        integral[blockIdx.x] = sums[0];
     }
-
-    if (cacheIndex == 0)
-        integral[blockIdx.x] = cache[0];
 }
 
 int main()
