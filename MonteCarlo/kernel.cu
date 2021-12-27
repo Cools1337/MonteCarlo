@@ -36,34 +36,46 @@ __device__ double sum(double* values, unsigned int n) {
 
 __global__ void monteCarlo(double* integral, unsigned int n)
 {
-    int tid = blockDim.x * blockIdx.x + threadIdx.x - 1;
+    int tid = blockDim.x * blockIdx.x + threadIdx.x;
     curandState_t state;
     curand_init(tid, 0, 0, &state);
     double fraction = 1.0 / (RAND_MAX + 1.0);
     double result = (curand(&state) % MAX_RANDOM_VALUE) * fraction * (START - END + 1) + END;
-    if (tid <= n && tid > 0)
+    if (tid <= n)
     {
         double x = result * STEP;
         integral[tid] = getFunctionValue(x);
     }
+
+    if (tid == 0)
+        integral[0] = sum(integral, n);
 }
 
 __global__ void monteCarloWithShared(double* integral, unsigned int n) {
     __shared__ double sums[THREADS_PER_BLOCK];
 
-    int tid = blockDim.x * blockIdx.x + threadIdx.x - 1;
+    int tid = blockDim.x * blockIdx.x + threadIdx.x;
     int sharedIndex = threadIdx.x;
     double result = getRandonPoint(tid);
     sums[sharedIndex] = 0;
-    if (tid <= n && tid > 0)
+    if (tid <= n)
     {
         double x = result * STEP;
-        sums[sharedIndex] += getFunctionValue(x);
+        sums[sharedIndex] = getFunctionValue(x);
     }
 
     __syncthreads();
+    int i = blockDim.x / 2;
+    while (i != 0)
+    {
+        if (sharedIndex < i)
+            sums[sharedIndex] += sums[sharedIndex + i];
 
-    integral[0] = sum(sums, THREADS_PER_BLOCK);
+        __syncthreads();
+        i /= 2;
+    }
+    if (sharedIndex == 0)
+        integral[blockIdx.x] = sums[0];
 }
 
 template <unsigned int blockSize>
@@ -91,6 +103,7 @@ __global__ void monteCarloWithReduce(double* integral, unsigned int n) {
     }
     __syncthreads();
 
+    if (blockSize >= 1024) { if (tid < 512) { sdata[tid] += sdata[tid + 512]; } __syncthreads(); }
     if (blockSize >= 512) { if (tid < 256) { sdata[tid] += sdata[tid + 256]; } __syncthreads(); }
     if (blockSize >= 256) { if (tid < 128) { sdata[tid] += sdata[tid + 128]; } __syncthreads(); }
     if (blockSize >= 128) { if (tid < 64) { sdata[tid] += sdata[tid + 64]; } __syncthreads(); }
@@ -116,17 +129,14 @@ int main()
 
     auto start = std::chrono::system_clock::now();
     monteCarlo <<< blocksPerGrid, THREADS_PER_BLOCK >>> (dev_c, n);
-    //monteCarloWithShared <<< blocksPerGrid, THREADS_PER_BLOCK >>> (dev_c, n);
-    //monteCarloWithReduce <<< blocksPerGrid, THREADS_PER_BLOCK >>> (dev_c, n);
+    // monteCarloWithShared <<< blocksPerGrid, THREADS_PER_BLOCK >>> (dev_c, n);
+    // monteCarloWithReduce <THREADS_PER_BLOCK><<< blocksPerGrid, THREADS_PER_BLOCK >>> (dev_c, n);
     
     cudaMemcpy(c, dev_c, n * sizeof(double), cudaMemcpyDeviceToHost);
     cudaMemcpy(c, dev_c, n * sizeof(double), cudaMemcpyDeviceToHost);
     auto end = std::chrono::system_clock::now();
     cudaFree(dev_mas);
     cudaFree(dev_c);
-    double sum = 0;
-    for (int i = 0; i < blocksPerGrid; i++)
-        sum += c[i];
     std::cout << "Result: " << sum << "\n";
     std::chrono::duration<double> elapsed = end - start;
     std::cout << "Time: " << elapsed.count() << " sec.";
