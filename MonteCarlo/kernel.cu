@@ -26,76 +26,77 @@ __device__ double getRandonPoint(long seed) {
     double result = (curand(&state) % MAX_RANDOM_VALUE) * fraction * (START - END + 1) + END;
     return result;
 }
-//
-//__device__ double atomicAdd(double* address, double val)
-//{
-//    unsigned long long int* address_as_ull =
-//        (unsigned long long int*)address;
-//    unsigned long long int old = *address_as_ull, assumed;
-//
-//    do {
-//        assumed = old;
-//        old = atomicCAS(address_as_ull, assumed,
-//            __double_as_longlong(val +
-//                __longlong_as_double(assumed)));
-//
-//        // Note: uses integer comparison to avoid hang in case of NaN (since NaN != NaN)
-//    } while (assumed != old);
-//
-//    return __longlong_as_double(old);
-//}
+
+__device__ double sum(double* values, unsigned int n) {
+    for (int i = 1; i < n; i++) {
+        values[0] += values[i];
+    }
+    return values[0];
+}
 
 __global__ void monteCarlo(double* integral, unsigned int n)
 {
     int tid = blockDim.x * blockIdx.x + threadIdx.x - 1;
-    curandState_t state;
-    curand_init(tid, /* seed контролирует последовательность значений, которые генерируются*/
-        0, /* порядковый номер важен только с несколькими ядрами*/
-        0, &state); /* curand работает как rand - за исключением того, что он принимает состояние как параметр*/
-    double fraction = 1.0 / (RAND_MAX + 1.0);
-    double result = (curand(&state)% MAX_RANDOM_VALUE) * fraction * (START - END + 1) + END ;
-    if (tid <= n && tid > 0)
-    {
-        double x = result * STEP;
-        integral[tid] = getFunctionValue(x);
-    }
-
-    /*__syncthreads();
-
-    if (tid == 0)
-    {
-        double x = result * STEP;
-        for (size_t i = 0; i < 48829; i++)
-        {
-           integral[0] += integral[i];
-        }
-    }*/
-}
-
-__global__ void monteCarloWithShared(double* integral, unsigned int n) {
-    __shared__ double sums[THREADS_PER_BLOCK];
-
-    int tid = threadIdx.x + blockIdx.x * blockDim.x - 1;
-    int cacheIndex = threadIdx.x;
-    double x;
     curandState_t state;
     curand_init(tid, 0, 0, &state);
     double fraction = 1.0 / (RAND_MAX + 1.0);
     double result = (curand(&state) % MAX_RANDOM_VALUE) * fraction * (START - END + 1) + END;
     if (tid <= n && tid > 0)
     {
-        x = result * STEP;
-        sums[cacheIndex] = getFunctionValue(x);
+        double x = result * STEP;
+        integral[tid] = getFunctionValue(x);
+    }
+}
+
+__global__ void monteCarloWithShared(double* integral, unsigned int n) {
+    __shared__ double sums[THREADS_PER_BLOCK];
+
+    int tid = blockDim.x * blockIdx.x + threadIdx.x - 1;
+    int sharedIndex = threadIdx.x;
+    double result = getRandonPoint(tid);
+    sums[sharedIndex] = 0;
+    if (tid <= n && tid > 0)
+    {
+        double x = result * STEP;
+        sums[sharedIndex] += getFunctionValue(x);
     }
 
     __syncthreads();
 
-    if (cacheIndex == 0) {
-        for (int i = 1; i < THREADS_PER_BLOCK; i++) {
-            sums[0] += sums[i];
-        }
-        integral[blockIdx.x] = sums[0];
+    integral[0] = sum(sums, THREADS_PER_BLOCK);
+}
+
+template <unsigned int blockSize>
+__device__ void warpReduce(volatile int* sdata, unsigned int tid) {
+    if (blockSize >= 64) sdata[tid] += sdata[tid + 32];
+    if (blockSize >= 32) sdata[tid] += sdata[tid + 16];
+    if (blockSize >= 16) sdata[tid] += sdata[tid + 8];
+    if (blockSize >= 8) sdata[tid] += sdata[tid + 4];
+    if (blockSize >= 4) sdata[tid] += sdata[tid + 2];
+    if (blockSize >= 2) sdata[tid] += sdata[tid + 1];
+}
+template <unsigned int blockSize>
+__global__ void monteCarloWithReduce(double* integral, unsigned int n) {
+
+    extern __shared__ int sdata[];
+    unsigned int tid = threadIdx.x;
+    unsigned int i = blockIdx.x * (blockSize * 2) + tid;
+    unsigned int gridSize = blockSize * 2 * gridDim.x;
+    sdata[tid] = 0;
+
+    while (i < n) {
+        double x = getRandonPoint(i);
+        sdata[tid] += getFunctionValue(x);
+        i += gridSize;
     }
+    __syncthreads();
+
+    if (blockSize >= 512) { if (tid < 256) { sdata[tid] += sdata[tid + 256]; } __syncthreads(); }
+    if (blockSize >= 256) { if (tid < 128) { sdata[tid] += sdata[tid + 128]; } __syncthreads(); }
+    if (blockSize >= 128) { if (tid < 64) { sdata[tid] += sdata[tid + 64]; } __syncthreads(); }
+
+    if (tid < 32) warpReduce<blockSize>(sdata, tid);
+    if (tid == 0) integral[blockIdx.x] = sdata[0];
 }
 
 int main()
@@ -115,7 +116,8 @@ int main()
 
     auto start = std::chrono::system_clock::now();
     monteCarlo <<< blocksPerGrid, THREADS_PER_BLOCK >>> (dev_c, n);
-    //monteCarloWithShared << < blocksPerGrid, THREADS_PER_BLOCK >> > (dev_c, n);
+    //monteCarloWithShared <<< blocksPerGrid, THREADS_PER_BLOCK >>> (dev_c, n);
+    //monteCarloWithReduce <<< blocksPerGrid, THREADS_PER_BLOCK >>> (dev_c, n);
     
     cudaMemcpy(c, dev_c, n * sizeof(double), cudaMemcpyDeviceToHost);
     cudaMemcpy(c, dev_c, n * sizeof(double), cudaMemcpyDeviceToHost);
@@ -126,7 +128,6 @@ int main()
     for (int i = 0; i < blocksPerGrid; i++)
         sum += c[i];
     std::cout << "Result: " << sum << "\n";
-    //std::cout << "Result: " << c[0] << "\n";
     std::chrono::duration<double> elapsed = end - start;
     std::cout << "Time: " << elapsed.count() << " sec.";
 
